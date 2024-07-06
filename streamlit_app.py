@@ -1,119 +1,107 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
+import yfinance as yf
+import datetime as dt
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, LSTM
 
+# Title of the Streamlit app
+st.title('Stock Price Prediction')
 
-st.title("📊 Data evaluation app")
+# Sidebar for user input
+st.sidebar.header('User Input')
+company = st.sidebar.text_input('Stock Ticker', 'TSLA')
 
-st.write(
-    "We are so glad to see you here. ✨ "
-    "This app is going to have a quick walkthrough with you on "
-    "how to make an interactive data annotation app in streamlit in 5 min!"
-)
+start = st.sidebar.date_input('Start Date', dt.datetime(2012, 1, 1))
+end = st.sidebar.date_input('End Date', dt.datetime(2023, 1, 1))
 
-st.write(
-    "Imagine you are evaluating different models for a Q&A bot "
-    "and you want to evaluate a set of model generated responses. "
-    "You have collected some user data. "
-    "Here is a sample question and response set."
-)
+# Download data
+@st.cache
+def download_data(company, start, end):
+    data = yf.download(company, start=start, end=end)
+    return data
 
-data = {
-    "Questions": [
-        "Who invented the internet?",
-        "What causes the Northern Lights?",
-        "Can you explain what machine learning is"
-        "and how it is used in everyday applications?",
-        "How do penguins fly?",
-    ],
-    "Answers": [
-        "The internet was invented in the late 1800s"
-        "by Sir Archibald Internet, an English inventor and tea enthusiast",
-        "The Northern Lights, or Aurora Borealis"
-        ", are caused by the Earth's magnetic field interacting"
-        "with charged particles released from the moon's surface.",
-        "Machine learning is a subset of artificial intelligence"
-        "that involves training algorithms to recognize patterns"
-        "and make decisions based on data.",
-        " Penguins are unique among birds because they can fly underwater. "
-        "Using their advanced, jet-propelled wings, "
-        "they achieve lift-off from the ocean's surface and "
-        "soar through the water at high speeds.",
-    ],
-}
+data = download_data(company, start, end)
 
-df = pd.DataFrame(data)
+# Show raw data
+st.subheader('Raw Data')
+st.write(data.tail())
 
-st.write(df)
+# Scale data
+scaler = MinMaxScaler(feature_range=(0, 1))
+scaled_data = scaler.fit_transform(data['Close'].values.reshape(-1, 1))
+prediction_days = 60
 
-st.write(
-    "Now I want to evaluate the responses from my model. "
-    "One way to achieve this is to use the very powerful `st.data_editor` feature. "
-    "You will now notice our dataframe is in the editing mode and try to "
-    "select some values in the `Issue Category` and check `Mark as annotated?` once finished 👇"
-)
+x_train = []
+y_train = []
 
-df["Issue"] = [True, True, True, False]
-df["Category"] = ["Accuracy", "Accuracy", "Completeness", ""]
+for x in range(prediction_days, len(scaled_data)):
+    x_train.append(scaled_data[x - prediction_days:x, 0])
+    y_train.append(scaled_data[x, 0])
 
-new_df = st.data_editor(
-    df,
-    column_config={
-        "Questions": st.column_config.TextColumn(width="medium", disabled=True),
-        "Answers": st.column_config.TextColumn(width="medium", disabled=True),
-        "Issue": st.column_config.CheckboxColumn("Mark as annotated?", default=False),
-        "Category": st.column_config.SelectboxColumn(
-            "Issue Category",
-            help="select the category",
-            options=["Accuracy", "Relevance", "Coherence", "Bias", "Completeness"],
-            required=False,
-        ),
-    },
-)
+x_train, y_train = np.array(x_train), np.array(y_train)
+x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
 
-st.write(
-    "You will notice that we changed our dataframe and added new data. "
-    "Now it is time to visualize what we have annotated!"
-)
+# Build model
+model = Sequential()
 
-st.divider()
+model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
+model.add(Dropout(0.2))
+model.add(LSTM(units=50, return_sequences=True))
+model.add(Dropout(0.2))
+model.add(LSTM(units=50))
+model.add(Dropout(0.2))
+model.add(Dense(units=1))
 
-st.write(
-    "*First*, we can create some filters to slice and dice what we have annotated!"
-)
+model.compile(optimizer='adam', loss='mean_squared_error')
+model.fit(x_train, y_train, epochs=25, batch_size=32)
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    issue_filter = st.selectbox("Issues or Non-issues", options=new_df.Issue.unique())
-with col2:
-    category_filter = st.selectbox(
-        "Choose a category",
-        options=new_df[new_df["Issue"] == issue_filter].Category.unique(),
-    )
+# Predicting future prices
+test_start = dt.datetime(2023, 1, 1)
+test_end = dt.datetime.now()
 
-st.dataframe(
-    new_df[(new_df["Issue"] == issue_filter) & (new_df["Category"] == category_filter)]
-)
+test_data = yf.download(company, start=test_start, end=test_end)
+actual_prices = test_data['Close'].values
 
-st.markdown("")
-st.write(
-    "*Next*, we can visualize our data quickly using `st.metrics` and `st.bar_plot`"
-)
+total_dataset = pd.concat((data['Close'], test_data['Close']), axis=0)
 
-issue_cnt = len(new_df[new_df["Issue"] == True])
-total_cnt = len(new_df)
-issue_perc = f"{issue_cnt/total_cnt*100:.0f}%"
+model_inputs = total_dataset[len(total_dataset) - len(test_data) - prediction_days:].values
+model_inputs = model_inputs.reshape(-1, 1)
+model_inputs = scaler.transform(model_inputs)
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    st.metric("Number of responses", issue_cnt)
-with col2:
-    st.metric("Annotation Progress", issue_perc)
+# Make predictions on test data
+x_test = []
+for x in range(prediction_days, len(model_inputs)):
+    x_test.append(model_inputs[x - prediction_days:x, 0])
 
-df_plot = new_df[new_df["Category"] != ""].Category.value_counts().reset_index()
+x_test = np.array(x_test)
+x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
 
-st.bar_chart(df_plot, x="Category", y="count")
+predicted_prices = model.predict(x_test)
+predicted_prices = scaler.inverse_transform(predicted_prices)
 
-st.write(
-    "Here we are at the end of getting started with streamlit! Happy Streamlit-ing! :balloon:"
-)
+# Plot the results
+st.subheader('Predicted vs Actual Prices')
+fig, ax = plt.subplots()
+ax.plot(actual_prices, color='black', label=f"Actual {company} Price")
+ax.plot(predicted_prices, color='green', label=f"Predicted {company} Price")
+ax.set_title(f"{company} Share Price")
+ax.set_xlabel('Time')
+ax.set_ylabel(f"{company} Share Price")
+ax.legend()
+st.pyplot(fig)
+
+# Predict tomorrow
+real_data = [model_inputs[len(model_inputs) - prediction_days:len(model_inputs), 0]]
+real_data = np.array(real_data)
+real_data = np.reshape(real_data, (real_data.shape[0], real_data.shape[1], 1))
+
+prediction = model.predict(real_data)
+prediction = scaler.inverse_transform(prediction)
+st.subheader('Prediction for Tomorrow')
+st.write(f"Prediction: {prediction[0][0]}")
+
 
